@@ -2,6 +2,8 @@
 name = "rbbq"
 version = "0.1.0"
 edition = "2024"
+description = "A fast bounded FIFO queue built around reusable blocks."
+license = "MIT"
 
 [dependencies]
 rand = "0.10.1"
