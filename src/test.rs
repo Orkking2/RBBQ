@@ -1,125 +1,333 @@
-// use crate::mpmc::FastFifo;
-// use std::array;
-// use std::thread::JoinHandle;
-// use std::time::Instant;
+use crate::FastFifo;
+use crate::error::Error;
+use crate::fifo_inner::FifoIndex;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
-// #[test]
-// fn test_construct() {
-//     let _ = FastFifo::<u64, 10, 10>::new();
-// }
+#[test]
+fn constructs_with_various_shapes() {
+    for (num_blocks, block_size) in [(2, 1), (2, 2), (3, 7), (10, 10), (16, 256)] {
+        let fifo = FastFifo::<u64>::new(num_blocks, block_size);
+        assert_eq!(fifo.pop(), Err(Error::Empty));
+    }
+}
 
-// #[test]
-// fn test_push_pop() {
-//     const NUM_BLOCKS: usize = 4;
-//     const BLOCK_SIZE: usize = 10;
+#[test]
+#[should_panic(expected = "only one block")]
+fn rejects_a_single_block() {
+    let _ = FastFifo::<u64>::new(1, 10);
+}
 
-//     type Fifo = FastFifo<usize, NUM_BLOCKS, BLOCK_SIZE>;
+/// Batches of up to `(num_blocks - 1) * block_size` always fit, wherever in a
+/// block the producer head happens to be, so each batch can be pushed whole.
+#[test]
+fn preserves_fifo_order_across_many_wraparounds() {
+    for (num_blocks, block_size) in [(2, 1), (2, 4), (3, 7), (4, 10), (16, 64)] {
+        let fifo = FastFifo::new(num_blocks, block_size);
+        let max_batch = (num_blocks - 1) * block_size;
+        let mut next_push = 0u64;
+        let mut next_pop = 0u64;
 
-//     let fifo = Fifo::new();
+        for batch in [1, block_size, block_size + 1, max_batch] {
+            let batch = batch.min(max_batch);
+            // Enough rounds for this batch size to lap the ring 50 times.
+            let rounds = 50 * num_blocks * block_size / batch;
+            for _ in 0..rounds {
+                for _ in 0..batch {
+                    fifo.push(next_push).unwrap();
+                    next_push += 1;
+                }
+                for _ in 0..batch {
+                    assert_eq!(fifo.pop(), Ok(next_pop));
+                    next_pop += 1;
+                }
+                assert_eq!(fifo.pop(), Err(Error::Empty));
+            }
+        }
+    }
+}
 
-//     println!("Empty fifo: {fifo:?}\n");
+#[test]
+fn reports_empty_and_full() {
+    let (num_blocks, block_size) = (4, 8);
+    let capacity = (num_blocks * block_size) as u64;
+    let fifo = FastFifo::new(num_blocks, block_size);
 
-//     for i in 0..100 {
-//         for j in 0..(Fifo::capacity() / 3) {
-//             fifo.push(i + j).unwrap();
-//         }
-//         println!("{fifo:?}\n");
-//         for j in 0..(Fifo::capacity() / 3) {
-//             let popped = fifo.pop().unwrap();
-//             assert!(j + i == popped, "Expected {} but got {}", j + i, popped);
-//         }
-//     }
-// }
+    // The queue must be reusable after being filled and drained.
+    for lap in 0..3 {
+        assert_eq!(fifo.pop(), Err(Error::Empty));
+        for i in 0..capacity {
+            fifo.push(lap * capacity + i).unwrap();
+        }
+        assert_eq!(fifo.push(u64::MAX), Err(Error::Full));
+        for i in 0..capacity {
+            assert_eq!(fifo.pop(), Ok(lap * capacity + i));
+        }
+        assert_eq!(fifo.pop(), Err(Error::Empty));
+    }
+}
 
-// #[test]
-// fn multi_thread() {
-//     let epoch = Instant::now();
+/// Reclamation is per block: producers cannot reuse a block until every entry
+/// in it has been consumed.
+#[test]
+fn reclaims_space_one_block_at_a_time() {
+    let fifo = FastFifo::new(2, 4);
+    for i in 0..8u64 {
+        fifo.push(i).unwrap();
+    }
+    for i in 0..3u64 {
+        assert_eq!(fifo.pop(), Ok(i));
+        assert_eq!(fifo.push(100), Err(Error::Full));
+    }
+    assert_eq!(fifo.pop(), Ok(3));
+    fifo.push(100).unwrap();
+}
 
-//     type T = usize;
-//     const NUM_BLOCKS: usize = 12;
-//     const BLOCK_SIZE: usize = 250;
+/// A consumer must not overtake a producer that has allocated a slot but has
+/// not committed it yet.
+#[test]
+fn consumers_see_busy_while_a_producer_entry_is_outstanding() {
+    let fifo = FastFifo::new(2, 4);
+    fifo.push(1u64).unwrap();
+    let mut entry = fifo.try_get_producer_entry().unwrap();
 
-//     const THREAD_COUNT: usize = 12;
+    assert_eq!(fifo.pop(), Err(Error::Busy));
 
-//     type Fifo = FastFifo<T, NUM_BLOCKS, BLOCK_SIZE>;
+    entry.produce_t_in_place(|slot| unsafe { slot.write(2) });
+    drop(entry);
+    assert_eq!(fifo.pop(), Ok(1));
+    assert_eq!(fifo.pop(), Ok(2));
+}
 
-//     fn gen_prod_thread_task(fifo: Fifo) -> impl Fn() {
-//         move || {
-//             for i in 0..250 {
-//                 fifo.push(i).unwrap();
-//             }
-//         }
-//     }
+/// A producer must not reclaim a block in which a consumer entry is still
+/// outstanding.
+#[test]
+fn producers_see_busy_while_a_consumer_entry_is_outstanding() {
+    let fifo = FastFifo::new(2, 2);
+    for i in 0..4u64 {
+        fifo.push(i).unwrap();
+    }
+    assert_eq!(fifo.pop(), Ok(0));
+    let mut entry = fifo.try_get_consumer_entry().unwrap();
 
-//     fn gen_cons_thread_task(fifo: Fifo) -> impl Fn() {
-//         move || {
-//             for _ in 0..250 {
-//                 fifo.pop().unwrap();
-//             }
-//         }
-//     }
+    assert_eq!(fifo.push(4), Err(Error::Busy));
 
-//     let fifo: Fifo = FastFifo::new();
+    let mut seen = None;
+    entry.consume_t_in_place(|slot| seen = Some(unsafe { slot.read() }));
+    drop(entry);
+    assert_eq!(seen, Some(1));
+    fifo.push(4).unwrap();
+}
 
-//     println!("Starting prod threads ({:?})", epoch.elapsed());
+#[test]
+fn in_place_closures_round_trip() {
+    let fifo = FastFifo::<u64>::new(3, 4);
+    for i in 0..100u64 {
+        fifo.push_in_place(|slot| unsafe { slot.write(i * 2) })
+            .unwrap();
+        let mut out = None;
+        fifo.pop_in_place(|slot| out = Some(unsafe { slot.read() }))
+            .unwrap();
+        assert_eq!(out, Some(i * 2));
+    }
+    assert!(matches!(
+        fifo.pop_in_place(|_| panic!("closure ran on an empty queue")),
+        Err(Error::Empty)
+    ));
+}
 
-//     let threads: [JoinHandle<()>; THREAD_COUNT] =
-//         array::from_fn(|_| std::thread::spawn(gen_prod_thread_task(fifo.clone())));
+/// Entries hand out the slot itself, so an owning type moves in and out
+/// without an intermediate copy on either side of the queue.
+#[test]
+fn entries_round_trip_owned_values() {
+    let fifo = FastFifo::<String>::new(2, 4);
+    for i in 0..32 {
+        let mut producer = fifo.try_get_producer_entry().unwrap();
+        producer.produce_t_in_place(|slot| unsafe { slot.write(format!("value {i}")) });
+        drop(producer);
 
-//     println!("Joining prod threads ({:?})", epoch.elapsed());
+        let mut consumer = fifo.try_get_consumer_entry().unwrap();
+        let mut out = None;
+        consumer.consume_t_in_place(|slot| out = Some(unsafe { slot.read() }));
+        drop(consumer);
+        assert_eq!(out.as_deref(), Some(format!("value {i}").as_str()));
+    }
+}
 
-//     threads
-//         .into_iter()
-//         .for_each(|handle| handle.join().unwrap());
+#[test]
+fn indexed_push_and_pop_address_a_slot() {
+    let fifo = FastFifo::new(2, 4);
+    for sub_block_idx in 0..3 {
+        fifo.indexed_push(
+            sub_block_idx as u64 + 10,
+            FifoIndex {
+                block_idx: 0,
+                sub_block_idx,
+            },
+        );
+    }
+    for sub_block_idx in 0..3 {
+        let (value, index) = fifo.indexed_pop().unwrap();
+        assert_eq!(value, sub_block_idx as u64 + 10);
+        assert_eq!(index.block_idx, 0);
+        assert_eq!(index.sub_block_idx, sub_block_idx);
+    }
+    assert!(matches!(fifo.indexed_pop(), Err(Error::Empty)));
+}
 
-//     println!("Prod threads joined ({:?})", epoch.elapsed());
+// Known failure: `Block::reserve_entry` builds the returned index with a
+// hard-coded `block_idx: 0`, so entries popped from any other block report the
+// wrong block, and passing that index to `indexed_push` writes to block 0.
+#[test]
+#[ignore = "known bug: indexed_pop always reports block_idx 0"]
+fn indexed_pop_reports_the_block_it_read_from() {
+    let fifo = FastFifo::new(2, 2);
+    for i in 0..3u64 {
+        fifo.push(i).unwrap();
+    }
+    let _ = fifo.indexed_pop().unwrap();
+    let _ = fifo.indexed_pop().unwrap();
+    let (value, index) = fifo.indexed_pop().unwrap();
+    assert_eq!(value, 2);
+    assert_eq!(index.sub_block_idx, 0);
+    assert_eq!(index.block_idx, 1);
+}
 
-//     println!("Full {fifo:?}");
+struct CountsDrops(Arc<AtomicUsize>);
 
-//     let epoch = Instant::now();
+impl Drop for CountsDrops {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
-//     println!("Starting cons threads ({:?})", epoch.elapsed());
+#[test]
+fn drops_values_left_in_the_first_block() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let fifo = FastFifo::new(4, 8);
+    for _ in 0..6 {
+        fifo.push(CountsDrops(drops.clone())).unwrap();
+    }
+    drop(fifo.pop().ok());
+    drop(fifo.pop().ok());
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
 
-//     let threads: [JoinHandle<()>; THREAD_COUNT] =
-//         array::from_fn(|_| std::thread::spawn(gen_cons_thread_task(fifo.clone())));
+    drop(fifo);
+    assert_eq!(drops.load(Ordering::Relaxed), 6);
+}
 
-//     println!("Joining cons threads ({:?})", epoch.elapsed());
+// Known failure: `Block::drop` keeps slots in `reserved..committed`, but a
+// block's `reserved` cursor is only reset when the consumer head reaches it.
+// Until then it still reads `block_size`, so that range is empty and values in
+// blocks the consumers have not reached are leaked (never dropped).
+#[test]
+#[ignore = "known bug: values in blocks not yet reached by consumers are leaked on drop"]
+fn drops_values_in_blocks_consumers_have_not_reached() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let fifo = FastFifo::new(4, 8);
+    for _ in 0..20 {
+        fifo.push(CountsDrops(drops.clone())).unwrap();
+    }
 
-//     threads
-//         .into_iter()
-//         .for_each(|handle| handle.join().unwrap());
+    drop(fifo);
+    assert_eq!(drops.load(Ordering::Relaxed), 20);
+}
 
-//     println!("Cons threads joined ({:?})", epoch.elapsed());
+fn tag(producer: usize, seq: usize) -> u64 {
+    ((producer as u64) << 32) | seq as u64
+}
 
-//     println!("Empty {fifo:?}");
-// }
+fn untag(value: u64) -> (usize, usize) {
+    ((value >> 32) as usize, (value & 0xffff_ffff) as usize)
+}
 
-// struct DropTester {
-//     pub inner: usize,
-// }
+/// Checks that every pushed value is popped exactly once, and that each
+/// consumer observes each producer's values in the order they were pushed.
+/// The queue is much smaller than the workload, so blocks are recycled
+/// constantly under contention.
+#[test]
+fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
+    const PRODUCERS: usize = 4;
+    const CONSUMERS: usize = 4;
+    const ITEMS_PER_PRODUCER: usize = 50_000;
+    const TOTAL: usize = PRODUCERS * ITEMS_PER_PRODUCER;
 
-// impl Drop for DropTester {
-//     fn drop(&mut self) {
-//         println!("Drop {}", self.inner);
-//     }
-// }
+    // A lost value must fail the test rather than spin forever.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let fifo = FastFifo::<u64>::new(8, 64);
+    let popped = Arc::new(AtomicUsize::new(0));
 
-// #[test]
-// fn drop_test() {
-//     let testers: [DropTester; 100] = array::from_fn(|i| DropTester { inner: i });
+    let producers: Vec<_> = (0..PRODUCERS)
+        .map(|producer| {
+            let fifo = fifo.clone();
+            thread::spawn(move || {
+                for seq in 0..ITEMS_PER_PRODUCER {
+                    while fifo.push(tag(producer, seq)).is_err() {
+                        assert!(Instant::now() < deadline, "producer timed out");
+                        thread::yield_now();
+                    }
+                }
+            })
+        })
+        .collect();
 
-//     let fifo = FastFifo::<_, 10, 10>::new();
+    let consumers: Vec<_> = (0..CONSUMERS)
+        .map(|_| {
+            let fifo = fifo.clone();
+            let popped = popped.clone();
+            thread::spawn(move || {
+                let mut received = Vec::new();
+                while popped.load(Ordering::Relaxed) < TOTAL && Instant::now() < deadline {
+                    match fifo.pop() {
+                        Ok(value) => {
+                            received.push(value);
+                            popped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(_) => thread::yield_now(),
+                    }
+                }
+                received
+            })
+        })
+        .collect();
 
-//     for t in testers {
-//         println!("Pushing {}", t.inner);
-//         fifo.push(t).unwrap();
-//     }
+    for producer in producers {
+        producer.join().unwrap();
+    }
+    let received: Vec<Vec<u64>> = consumers
+        .into_iter()
+        .map(|consumer| consumer.join().unwrap())
+        .collect();
 
-//     println!("Manual dropping...");
+    let mut delivery_counts = vec![0u8; TOTAL];
+    for log in &received {
+        let mut last_seq = [None; PRODUCERS];
+        for &value in log {
+            let (producer, seq) = untag(value);
+            assert!(
+                producer < PRODUCERS && seq < ITEMS_PER_PRODUCER,
+                "value {value:#x} was never pushed"
+            );
+            assert!(
+                last_seq[producer].is_none_or(|last| last < seq),
+                "producer {producer}: saw seq {seq} after {:?}",
+                last_seq[producer]
+            );
+            last_seq[producer] = Some(seq);
 
-//     for _ in 0..50 {
-//         fifo.pop().unwrap();
-//     }
+            let slot = &mut delivery_counts[producer * ITEMS_PER_PRODUCER + seq];
+            *slot = slot.saturating_add(1);
+        }
+    }
 
-//     println!("Autodropping...");
-// }
+    let missing = delivery_counts.iter().filter(|&&n| n == 0).count();
+    let duplicated = delivery_counts.iter().filter(|&&n| n > 1).count();
+    assert_eq!(
+        (missing, duplicated),
+        (0, 0),
+        "(missing, duplicated) values"
+    );
+    assert_eq!(fifo.pop(), Err(Error::Empty));
+}

@@ -13,6 +13,11 @@ pub(crate) mod atom_pair;
 #[cfg(test)]
 mod test;
 
+/// Compiles and runs the README's example as a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub type Result<T> = ::std::result::Result<T, Error>;
 
 #[derive(Clone)]
