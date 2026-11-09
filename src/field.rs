@@ -24,9 +24,15 @@ impl From<FieldConfig> for Field {
     }
 }
 
+/// Spare index bits above those needed for `index_max`. A producer checks that
+/// a block has room and then increments `allocated`, so `allocated` can pass
+/// `index_max` by one for each producer in that window. These bits keep such an
+/// overshoot out of the version, for up to `2^OVERSHOOT_BITS` producers.
+const OVERSHOOT_BITS: u32 = usize::BITS / 4;
+
 impl Field {
     const fn version_shift(index_max: usize) -> u32 {
-        usize::BITS - index_max.leading_zeros()
+        usize::BITS - index_max.leading_zeros() + OVERSHOOT_BITS
     }
 
     const fn index_mask(index_max: usize) -> usize {
@@ -163,6 +169,15 @@ mod tests {
 
         assert_eq!(added.get_raw_inner(), field.get_raw_inner() + 5);
         assert_eq!(added.get_index_max(), field.get_index_max());
+    }
+
+    #[test]
+    fn test_field_index_overshoot_does_not_reach_version() {
+        let field = Field::from_parts(7, 3, 7);
+        let overshot = field.overflowing_add(1000);
+
+        assert_eq!(overshot.get_version(), 3);
+        assert_eq!(overshot.get_index(), 1007);
     }
 
     #[test]

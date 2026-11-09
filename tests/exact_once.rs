@@ -154,10 +154,6 @@ fn run(
 }
 
 fn check(producers: usize, consumers: usize, num_blocks: usize, block_size: usize) {
-    // A block's `allocated` offset may overshoot `block_size` by up to one per
-    // producer; its bit field holds offsets below the next power of two above
-    // `block_size`, so keep the producers within that headroom.
-    assert!(producers <= (block_size + 1).next_power_of_two() - block_size);
     let rounds = env_usize("RBBQ_STRESS_ROUNDS", 40);
     let items = env_usize("RBBQ_STRESS_ITEMS", 1 << 14);
     let out = run(producers, consumers, num_blocks, block_size, items, rounds);

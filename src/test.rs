@@ -258,25 +258,25 @@ fn untag(value: u64) -> (usize, usize) {
 
 /// Checks that every pushed value is popped exactly once, and that each
 /// consumer observes each producer's values in the order they were pushed.
-/// The queue is much smaller than the workload, so blocks are recycled
-/// constantly under contention.
-#[test]
-fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
-    const PRODUCERS: usize = 4;
-    const CONSUMERS: usize = 4;
-    const ITEMS_PER_PRODUCER: usize = 50_000;
-    const TOTAL: usize = PRODUCERS * ITEMS_PER_PRODUCER;
+fn check_mpmc(
+    producer_count: usize,
+    consumer_count: usize,
+    items_per_producer: usize,
+    num_blocks: usize,
+    block_size: usize,
+) {
+    let total = producer_count * items_per_producer;
 
     // A lost value must fail the test rather than spin forever.
     let deadline = Instant::now() + Duration::from_secs(30);
-    let fifo = FastFifo::<u64>::new(8, 64);
+    let fifo = FastFifo::<u64>::new(num_blocks, block_size);
     let popped = Arc::new(AtomicUsize::new(0));
 
-    let producers: Vec<_> = (0..PRODUCERS)
+    let producers: Vec<_> = (0..producer_count)
         .map(|producer| {
             let fifo = fifo.clone();
             thread::spawn(move || {
-                for seq in 0..ITEMS_PER_PRODUCER {
+                for seq in 0..items_per_producer {
                     while fifo.push(tag(producer, seq)).is_err() {
                         assert!(Instant::now() < deadline, "producer timed out");
                         thread::yield_now();
@@ -286,13 +286,13 @@ fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
         })
         .collect();
 
-    let consumers: Vec<_> = (0..CONSUMERS)
+    let consumers: Vec<_> = (0..consumer_count)
         .map(|_| {
             let fifo = fifo.clone();
             let popped = popped.clone();
             thread::spawn(move || {
                 let mut received = Vec::new();
-                while popped.load(Ordering::Relaxed) < TOTAL && Instant::now() < deadline {
+                while popped.load(Ordering::Relaxed) < total && Instant::now() < deadline {
                     match fifo.pop() {
                         Ok(value) => {
                             received.push(value);
@@ -314,13 +314,13 @@ fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
         .map(|consumer| consumer.join().unwrap())
         .collect();
 
-    let mut delivery_counts = vec![0u8; TOTAL];
+    let mut delivery_counts = vec![0u8; total];
     for log in &received {
-        let mut last_seq = [None; PRODUCERS];
+        let mut last_seq = vec![None; producer_count];
         for &value in log {
             let (producer, seq) = untag(value);
             assert!(
-                producer < PRODUCERS && seq < ITEMS_PER_PRODUCER,
+                producer < producer_count && seq < items_per_producer,
                 "value {value:#x} was never pushed"
             );
             assert!(
@@ -330,7 +330,7 @@ fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
             );
             last_seq[producer] = Some(seq);
 
-            let slot = &mut delivery_counts[producer * ITEMS_PER_PRODUCER + seq];
+            let slot = &mut delivery_counts[producer * items_per_producer + seq];
             *slot = slot.saturating_add(1);
         }
     }
@@ -343,4 +343,23 @@ fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
         "(missing, duplicated) values"
     );
     assert_eq!(fifo.pop(), Err(Error::Empty));
+}
+
+/// The queue is much smaller than the workload, so blocks are recycled
+/// constantly under contention.
+#[test]
+fn mpmc_delivers_each_value_exactly_once_in_producer_order() {
+    check_mpmc(4, 4, 50_000, 8, 64);
+}
+
+/// With these block sizes the offset of a full block has no spare values below
+/// the next power of two, so a producer that overshoots the end of the block
+/// must not carry into the version bits.
+#[test]
+fn mpmc_survives_producers_overshooting_a_block_of_two_to_the_k_minus_one() {
+    for block_size in [3, 7, 15] {
+        for _ in 0..10 {
+            check_mpmc(8, 4, 2_000, 4, block_size);
+        }
+    }
 }
