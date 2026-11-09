@@ -191,6 +191,7 @@ fn indexed_pop_reports_the_block_it_read_from() {
     assert_eq!(index.block_idx, 1);
 }
 
+#[derive(Debug)]
 struct CountsDrops(Arc<AtomicUsize>);
 
 impl Drop for CountsDrops {
@@ -246,6 +247,38 @@ fn drops_exactly_the_live_values_after_a_lap() {
 
     drop(fifo);
     assert_eq!(drops.load(Ordering::Relaxed), 11);
+}
+
+#[test]
+fn debug_only_inspects_owned_values() {
+    let fifo = FastFifo::new(2, 4);
+    fifo.push("first".to_string()).unwrap();
+    fifo.push("second".to_string()).unwrap();
+
+    let printed = format!("{fifo:?}");
+    assert!(printed.contains("first") && printed.contains("second"));
+
+    assert_eq!(fifo.pop().unwrap(), "first");
+    assert_eq!(fifo.pop().unwrap(), "second");
+}
+
+#[test]
+fn debug_does_not_drop_values() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let fifo = FastFifo::new(2, 4);
+    fifo.push(CountsDrops(drops.clone())).unwrap();
+
+    let _ = format!("{fifo:?}");
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    drop(fifo);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn is_send_and_sync_for_send_values() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<FastFifo<String>>();
 }
 
 fn tag(producer: usize, seq: usize) -> u64 {

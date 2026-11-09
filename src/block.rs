@@ -270,9 +270,7 @@ impl<T: Debug> Debug for Block<T> {
                 } else if i >= reserved
                     || (consumed == self.block_size && reserved == self.block_size)
                 {
-                    format!("{:?}", unsafe {
-                        (t as *const MaybeUninit<T>).read().assume_init_read()
-                    })
+                    format!("{:?}", unsafe { t.assume_init_ref() })
                 } else if i >= consumed {
                     format!("Reserved")
                 } else {

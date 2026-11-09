@@ -113,11 +113,8 @@ RBBQ_STRESS_ROUNDS=300 cargo test --release --test exact_once
   entries trust the closure to initialize the slot, and `indexed_push` trusts
   the caller's index. A wrong closure or index makes a later `pop` read
   uninitialized memory.
-- **`FastFifo<T>` is `Send` and `Sync` for every `T`.** The bounds should
-  require `T: Send`.
-- **`Debug` is unsafe to use with owning types or concurrent access.** It reads
-  entries by bitwise copy and then drops the copy, so a value that owns
-  resources is dropped twice.
+- **`Debug` is not synchronized.** Format a queue only while no other thread is
+  using it, because a concurrent `pop` can free a value while it is being read.
 - **Producer and version limits.** Each cursor reserves a quarter of the word
   for offset overshoot, which allows 2^16 concurrent producers on 64-bit targets
   and 2^8 on 32-bit targets. Versions are finite and are not checked for

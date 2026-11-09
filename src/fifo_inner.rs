@@ -16,9 +16,9 @@ pub(crate) struct FastFifoInner<T> {
 }
 
 #[rustfmt::skip]
-unsafe impl<T> Send for FastFifoInner<T> {}
+unsafe impl<T: Send> Send for FastFifoInner<T> {}
 #[rustfmt::skip]
-unsafe impl<T> Sync for FastFifoInner<T> {}
+unsafe impl<T: Send> Sync for FastFifoInner<T> {}
 
 enum AdvancePheadState {
     Success,

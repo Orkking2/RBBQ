@@ -17,6 +17,20 @@ mod test;
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
 
+/// A queue of non-`Send` values must not cross threads.
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rbbq::FastFifo<std::rc::Rc<u8>>>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<rbbq::FastFifo<std::rc::Rc<u8>>>();
+/// ```
+#[cfg(doctest)]
+struct NotSendOrSyncForNonSendValues;
+
 pub use error::Error;
 pub use fifo_inner::FifoIndex;
 
