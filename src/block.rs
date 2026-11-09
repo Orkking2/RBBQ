@@ -192,15 +192,26 @@ impl<T> Block<T> {
         } = self;
 
         let allocated = allocated.load(Ordering::Relaxed).get_index();
-        let committed = committed.load(Ordering::Relaxed).get_index();
-        let reserved = reserved.load(Ordering::Relaxed).get_index();
+        let committed = committed.load(Ordering::Relaxed);
+        let committed_version = committed.get_version();
+        let committed = committed.get_index();
+        let reserved = reserved.load(Ordering::Relaxed);
+        // Consumers reset `reserved` to this block's version only on reaching
+        // it. Until then it describes the previous lap, and every committed
+        // slot holds a value.
+        let first_live = if reserved.get_version() < committed_version {
+            0
+        } else {
+            reserved.get_index()
+        };
+        let reserved = reserved.get_index();
         let consumed = consumed.load(Ordering::Relaxed).get_index();
 
         unsafe { &mut **entries }
             .iter_mut()
             .enumerate()
             .for_each(|(i, t)| {
-                if i < committed && i >= reserved {
+                if i < committed && i >= first_live {
                     // This T is valid, so we must manually drop it
                     std::mem::drop(unsafe {
                         (t as *const MaybeUninit<T>).read().assume_init_read()
@@ -217,7 +228,11 @@ impl<T> Block<T> {
                         }
                     )
                 }
-            })
+            });
+
+        // Allocated by `Box::into_raw` in the constructors. The elements are
+        // `MaybeUninit`, so this frees the storage without touching them.
+        std::mem::drop(unsafe { Box::from_raw(*entries) });
     }
 }
 

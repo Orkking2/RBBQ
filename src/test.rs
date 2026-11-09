@@ -214,12 +214,7 @@ fn drops_values_left_in_the_first_block() {
     assert_eq!(drops.load(Ordering::Relaxed), 6);
 }
 
-// Known failure: `Block::drop` keeps slots in `reserved..committed`, but a
-// block's `reserved` cursor is only reset when the consumer head reaches it.
-// Until then it still reads `block_size`, so that range is empty and values in
-// blocks the consumers have not reached are leaked (never dropped).
 #[test]
-#[ignore = "known bug: values in blocks not yet reached by consumers are leaked on drop"]
 fn drops_values_in_blocks_consumers_have_not_reached() {
     let drops = Arc::new(AtomicUsize::new(0));
     let fifo = FastFifo::new(4, 8);
@@ -229,6 +224,28 @@ fn drops_values_in_blocks_consumers_have_not_reached() {
 
     drop(fifo);
     assert_eq!(drops.load(Ordering::Relaxed), 20);
+}
+
+/// After a full lap the first block is reused, so its `reserved` cursor has a
+/// previous version until consumers arrive, and then the current one.
+#[test]
+fn drops_exactly_the_live_values_after_a_lap() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let fifo = FastFifo::new(2, 4);
+    for _ in 0..8 {
+        fifo.push(CountsDrops(drops.clone())).unwrap();
+        drop(fifo.pop().ok());
+    }
+    assert_eq!(drops.load(Ordering::Relaxed), 8);
+
+    for _ in 0..3 {
+        fifo.push(CountsDrops(drops.clone())).unwrap();
+    }
+    drop(fifo.pop().ok());
+    assert_eq!(drops.load(Ordering::Relaxed), 9);
+
+    drop(fifo);
+    assert_eq!(drops.load(Ordering::Relaxed), 11);
 }
 
 fn tag(producer: usize, seq: usize) -> u64 {

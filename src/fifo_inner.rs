@@ -277,6 +277,9 @@ impl<T> Drop for FastFifoInner<T> {
         unsafe { &mut *self.blocks }
             .iter_mut()
             .for_each(Block::drop);
+        // Allocated by `Box::into_raw` in `new`. `Block` has no `Drop` impl, so
+        // this frees only the array.
+        std::mem::drop(unsafe { Box::from_raw(self.blocks) });
     }
 }
 
