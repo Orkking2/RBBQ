@@ -1,6 +1,5 @@
 use entries::{ConsumingEntry, ProducingEntry};
-use error::Error;
-use fifo_inner::{FastFifoInner, FifoIndex};
+use fifo_inner::FastFifoInner;
 use std::{fmt::Debug, sync::Arc};
 
 pub(crate) mod atomic;
@@ -17,6 +16,9 @@ mod test;
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+pub use error::Error;
+pub use fifo_inner::FifoIndex;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 
