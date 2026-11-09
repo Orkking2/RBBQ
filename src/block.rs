@@ -1,5 +1,8 @@
 use crate::{
-    atom_pair::Line128, atomic::AtomicField, entries::EntryDescription, field::FieldConfig,
+    atom_pair::Line128,
+    atomic::AtomicField,
+    entries::EntryDescription,
+    field::{Field, FieldConfig},
     fifo_inner::FifoIndex,
 };
 use std::{fmt::Debug, mem::MaybeUninit, sync::atomic::Ordering};
@@ -125,33 +128,55 @@ impl<T> Block<T> {
                 // All previous writes in this block must be visible before this load.
                 let committed = self.committed.load(Ordering::Acquire);
 
-                if reserved.get_index() == committed.get_index() {
-                    break ReserveState::NoEntry;
-                }
-                if committed.get_index() != self.block_size {
-                    let allocated = self.allocated.load(Ordering::Relaxed);
-                    if allocated.get_index() != committed.get_index() {
-                        break ReserveState::NotAvailable;
-                    }
-                }
-                if self
-                    .reserved
-                    .fetch_max(reserved.overflowing_add(1), Ordering::Relaxed)
-                    == reserved
-                {
-                    break ReserveState::Reserved(EntryDescription {
-                        block: &self,
-                        index: FifoIndex {
-                            block_idx: 0,
-                            sub_block_idx: reserved.get_index(),
-                        },
-                        version: reserved.get_version(),
-                    });
+                if let Some(state) = self.try_reserve(reserved, committed, || {
+                    self.allocated.load(Ordering::Relaxed)
+                }) {
+                    break state;
                 }
             } else {
                 break ReserveState::BlockDone(reserved.get_version());
             }
         }
+    }
+
+    /// Reserve the slot at `reserved` against the loaded `committed` (and
+    /// `allocated`, loaded only when needed). `None` means another consumer
+    /// advanced `reserved` first, and the caller reloads and retries.
+    pub(crate) fn try_reserve(
+        &self,
+        reserved: Field,
+        committed: Field,
+        allocated: impl FnOnce() -> Field,
+    ) -> Option<ReserveState<'_, T>> {
+        // `committed` may be older than `reserved`: nothing orders the loads of
+        // `committed` and `allocated` after the load of `reserved` on a weakly
+        // ordered core, and `reserved` is advanced with relaxed operations. Only
+        // a slot below this view of `committed`, in the same version, is written.
+        // Testing the offsets for equality alone handed out the first unwritten
+        // slot, and then, with `reserved` above `committed`, every later one in
+        // the block.
+        if committed.get_version() != reserved.get_version()
+            || committed.get_index() <= reserved.get_index()
+        {
+            return Some(ReserveState::NoEntry);
+        }
+        if committed.get_index() != self.block_size && allocated() != committed {
+            return Some(ReserveState::NotAvailable);
+        }
+        (self
+            .reserved
+            .fetch_max(reserved.overflowing_add(1), Ordering::Relaxed)
+            == reserved)
+            .then(|| {
+                ReserveState::Reserved(EntryDescription {
+                    block: &self,
+                    index: FifoIndex {
+                        block_idx: 0,
+                        sub_block_idx: reserved.get_index(),
+                    },
+                    version: reserved.get_version(),
+                })
+            })
     }
 
     /// Drop the valid values inside self.

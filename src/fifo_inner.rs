@@ -279,3 +279,57 @@ impl<T> Drop for FastFifoInner<T> {
             .for_each(Block::drop);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One lap through both blocks, so that every slot holds an old value,
+    /// then `n` items pushed and taken in block 0 at its second version. Not
+    /// dropped: a failing case leaves a reservation that `Block::drop` rejects.
+    fn queue_at_offset(n: u64) -> std::mem::ManuallyDrop<FastFifoInner<u64>> {
+        let fifo = FastFifoInner::new(2, 8);
+        for v in (0..16).chain(100..100 + n) {
+            fifo.push(v).unwrap();
+            assert_eq!(fifo.pop().unwrap(), v);
+        }
+        std::mem::ManuallyDrop::new(fifo)
+    }
+
+    /// The end of a round: a consumer whose loads of `committed` and
+    /// `allocated` in `reserve_entry` were satisfied before the producer's
+    /// last commit, and whose load of `reserved` after another consumer took
+    /// that last item. Nothing orders the three loads on a weakly ordered core
+    /// (`reserved` is advanced with relaxed operations), so this view is one
+    /// the queue must survive: it must not hand out the next, unwritten slot.
+    #[test]
+    fn a_stale_view_of_committed_hands_out_no_unwritten_slot() {
+        let fifo = queue_at_offset(2);
+        let blk = &unsafe { &*fifo.blocks }[0];
+        let committed_early = blk.committed.load(Ordering::Relaxed);
+        let allocated_early = blk.allocated.load(Ordering::Relaxed);
+        fifo.push(102).unwrap();
+        assert_eq!(fifo.pop().unwrap(), 102);
+        let reserved = blk.reserved.load(Ordering::Relaxed);
+        assert!(matches!(
+            blk.try_reserve(reserved, committed_early, || allocated_early),
+            Some(ReserveState::NoEntry)
+        ));
+        assert!(fifo.pop().is_err(), "an empty queue handed out a value");
+    }
+
+    /// If `reserved` ever stands above `committed` in the same version, the
+    /// slots between are unwritten: no consumer may reserve one. Comparing
+    /// offsets for equality alone let every later consumer through, so one
+    /// early reservation became one per remaining slot of the block, the
+    /// rest of the producer's last block in a round.
+    #[test]
+    fn reserved_above_committed_is_not_compounded() {
+        let fifo = queue_at_offset(3);
+        let blk = &unsafe { &*fifo.blocks }[0];
+        let reserved = blk.reserved.load(Ordering::Relaxed);
+        blk.reserved.fetch_max(reserved.overflowing_add(1), Ordering::Relaxed);
+        let handed_out = (0..8).filter(|_| fifo.pop().is_ok()).count();
+        assert_eq!(handed_out, 0, "an empty queue handed out {handed_out} values");
+    }
+}
