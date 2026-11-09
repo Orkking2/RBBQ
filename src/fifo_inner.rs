@@ -219,7 +219,7 @@ impl<T> FastFifoInner<T> {
     pub fn get_consumer_entry(&self) -> Result<ConsumingEntry<'_, T>> {
         loop {
             let (ch, blk) = self.get_chead_and_block();
-            match blk.reserve_entry() {
+            match blk.reserve_entry(ch.get_index()) {
                 ReserveState::BlockDone(version) => {
                     if !self.advance_chead(ch, version) {
                         break Err(Error::Empty);
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(fifo.pop().unwrap(), 102);
         let reserved = blk.reserved.load(Ordering::Relaxed);
         assert!(matches!(
-            blk.try_reserve(reserved, committed_early, || allocated_early),
+            blk.try_reserve(0, reserved, committed_early, || allocated_early),
             Some(ReserveState::NoEntry)
         ));
         assert!(fifo.pop().is_err(), "an empty queue handed out a value");

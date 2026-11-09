@@ -120,7 +120,7 @@ impl<T> Block<T> {
         }
     }
 
-    pub fn reserve_entry(&self) -> ReserveState<'_, T> {
+    pub fn reserve_entry(&self, block_idx: usize) -> ReserveState<'_, T> {
         loop {
             let reserved = self.reserved.load(Ordering::Relaxed);
 
@@ -128,7 +128,7 @@ impl<T> Block<T> {
                 // All previous writes in this block must be visible before this load.
                 let committed = self.committed.load(Ordering::Acquire);
 
-                if let Some(state) = self.try_reserve(reserved, committed, || {
+                if let Some(state) = self.try_reserve(block_idx, reserved, committed, || {
                     self.allocated.load(Ordering::Relaxed)
                 }) {
                     break state;
@@ -144,6 +144,7 @@ impl<T> Block<T> {
     /// advanced `reserved` first, and the caller reloads and retries.
     pub(crate) fn try_reserve(
         &self,
+        block_idx: usize,
         reserved: Field,
         committed: Field,
         allocated: impl FnOnce() -> Field,
@@ -171,7 +172,7 @@ impl<T> Block<T> {
                 ReserveState::Reserved(EntryDescription {
                     block: &self,
                     index: FifoIndex {
-                        block_idx: 0,
+                        block_idx,
                         sub_block_idx: reserved.get_index(),
                     },
                     version: reserved.get_version(),

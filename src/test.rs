@@ -177,11 +177,7 @@ fn indexed_push_and_pop_address_a_slot() {
     assert!(matches!(fifo.indexed_pop(), Err(Error::Empty)));
 }
 
-// Known failure: `Block::reserve_entry` builds the returned index with a
-// hard-coded `block_idx: 0`, so entries popped from any other block report the
-// wrong block, and passing that index to `indexed_push` writes to block 0.
 #[test]
-#[ignore = "known bug: indexed_pop always reports block_idx 0"]
 fn indexed_pop_reports_the_block_it_read_from() {
     let fifo = FastFifo::new(2, 2);
     for i in 0..3u64 {
