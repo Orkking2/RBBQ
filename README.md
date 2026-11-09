@@ -45,12 +45,13 @@ producers get an error instead of overwriting old data.
 
 Fallible operations return an error rather than blocking:
 `Full` or `Empty` when there is no room or no data, and `Busy` when another
-thread's outstanding entry is in the way. Callers choose how to retry.
+thread's outstanding entry is in the way. These are the variants of
+`rbbq::Error`. Callers choose how to retry.
 
 ## Usage
 
 ```rust
-use rbbq::FastFifo;
+use rbbq::{Error, FastFifo};
 use std::thread;
 
 // 4 blocks of 16 entries each: room for 64 values.
@@ -84,6 +85,7 @@ fifo.push_in_place(|slot| unsafe { slot.write(7) }).unwrap();
 let mut out = 0;
 fifo.pop_in_place(|slot| out = unsafe { slot.read() }).unwrap();
 assert_eq!(out, 7);
+assert_eq!(fifo.pop(), Err(Error::Empty));
 ```
 
 The in-place closures receive a raw pointer. A producer closure must initialize
@@ -96,11 +98,34 @@ cargo test
 ```
 
 The suite covers FIFO order across block wraparounds, full, empty and busy
-behavior, each entry API, and a multi-producer, multi-consumer test that checks
-exactly-once delivery and per-producer order. Tests marked `#[ignore]` document
-known bugs. Run them with `cargo test -- --ignored`.
+behavior, each entry API, value drops and memory release, and multi-producer,
+multi-consumer tests that check exactly-once delivery and per-producer order.
+`tests/exact_once.rs` is a stress test that recycles blocks over many rounds.
+Scale it up with:
 
-`src/atom_pair.rs` contains `cfg(loom)` hooks for loom model checking.
+```sh
+RBBQ_STRESS_ROUNDS=300 cargo test --release --test exact_once
+```
+
+## Known issues
+
+- **Some safe functions can cause undefined behavior.** `push_in_place` and
+  entries trust the closure to initialize the slot, and `indexed_push` trusts
+  the caller's index. A wrong closure or index makes a later `pop` read
+  uninitialized memory.
+- **`FastFifo<T>` is `Send` and `Sync` for every `T`.** The bounds should
+  require `T: Send`.
+- **`Debug` is unsafe to use with owning types or concurrent access.** It reads
+  entries by bitwise copy and then drops the copy, so a value that owns
+  resources is dropped twice.
+- **Producer and version limits.** Each cursor reserves a quarter of the word
+  for offset overshoot, which allows 2^16 concurrent producers on 64-bit targets
+  and 2^8 on 32-bit targets. Versions are finite and are not checked for
+  wraparound.
+- **Limited verification.** Concurrency has been stress-tested only on Apple
+  Silicon. `src/atom_pair.rs` contains `cfg(loom)` hooks for loom model
+  checking, but they are on a type the queue does not use yet, and the queue
+  has not been model-checked.
 
 ## License
 
